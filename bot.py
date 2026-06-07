@@ -3,6 +3,7 @@ import re
 import time
 import requests
 import os
+import asyncio
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
@@ -737,7 +738,13 @@ def main():
     # Enable persistence
     persistence = PicklePersistence(filepath="bot_session.pickle")
     
-    app = Application.builder().token(TOKEN).persistence(persistence).build()
+    # Build application with explicit defaults to avoid version-specific builder issues
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .persistence(persistence)
+        .build()
+    )
     
     # Login Conversation
     conv = ConversationHandler(
