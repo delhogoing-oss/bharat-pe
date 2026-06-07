@@ -46,9 +46,9 @@ async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
 class BharatPeClient:
     def __init__(self, mobile: str):
         self.mobile = mobile
-        # Use a more modern Chrome version and specific impersonation
+        # chrome110 is often more stable for CF bypass than newer versions
         self.session = curl_requests.Session(
-            impersonate="chrome120",
+            impersonate="chrome110",
             proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
             timeout=30
         )
@@ -95,7 +95,7 @@ class BharatPeClient:
         self.__dict__.update(state)
         # Reconstruct curl_cffi session
         self.session = curl_requests.Session(
-            impersonate="chrome120",
+            impersonate="chrome110",
             proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
             timeout=30
         )
@@ -120,12 +120,16 @@ class BharatPeClient:
             logger.info(f"GET {url} -> status {resp.status_code}")
             
             if resp.status_code == 403:
-                logger.error("Cloudflare blocked the initial request (403). Trying with mobile user agent fallback...")
-                # Fallback to mobile impersonation if desktop fails
-                self.session.impersonate = "safari_ios_16_0"
+                logger.error("Cloudflare blocked the initial request (403). Trying with Safari fallback...")
+                # Fallback to Safari impersonation if Chrome fails
+                self.session = curl_requests.Session(
+                    impersonate="safari15_5",
+                    proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
+                    timeout=30
+                )
                 resp = self.session.get(url, timeout=20)
                 if resp.status_code == 403:
-                    logger.error("Still blocked with mobile UA. Cloudflare is strictly guarding the page.")
+                    logger.error("Still blocked with Safari. Cloudflare is strictly guarding the page.")
                     return False
 
             if resp.status_code != 200:
