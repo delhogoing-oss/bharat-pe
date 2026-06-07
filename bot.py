@@ -4,6 +4,7 @@ import time
 import requests
 import os
 import asyncio
+import cloudscraper
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
@@ -45,7 +46,14 @@ async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
 class BharatPeClient:
     def __init__(self, mobile: str):
         self.mobile = mobile
-        self.session = requests.Session()
+        # Use cloudscraper to bypass Cloudflare protection
+        self.session = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
         self.base_url = "https://enterprise.bharatpe.in"
         self.deposit_api = "https://api-deposit.bharatpe.in"
         self.txn_api = "https://payments-tesseract.bharatpe.in"
@@ -57,29 +65,24 @@ class BharatPeClient:
         self.xsrf_token = None
         self.merchant_name = "Merchant"
 
-        # Mimic browser headers exactly based on successful transaction request
+        # Headers are now managed primarily by cloudscraper, 
+        # but we add specific BharatPe requirements
         self.session.headers.update({
             "accept": "application/json, text/javascript, */*; q=0.01",
-            "accept-language": "en-US,en;q=0.7",
+            "accept-language": "en-US,en;q=0.9",
             "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
             "origin": self.base_url,
-            "priority": "u=1, i",
             "referer": f"{self.base_url}/",
-            "sec-ch-ua": '"Brave";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
-            "sec-gpc": "1",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             "x-requested-with": "XMLHttpRequest",
         })
 
     def __getstate__(self):
-        """Prepare for pickling: remove non-pickleable session but keep cookies/headers."""
+        """Prepare for pickling: extract session state."""
         state = self.__dict__.copy()
-        # Extract session state
         state["_session_cookies"] = requests.utils.dict_from_cookiejar(self.session.cookies)
         state["_session_headers"] = dict(self.session.headers)
         del state["session"]
@@ -90,8 +93,14 @@ class BharatPeClient:
         cookies = state.pop("_session_cookies", {})
         headers = state.pop("_session_headers", {})
         self.__dict__.update(state)
-        # Reconstruct session
-        self.session = requests.Session()
+        # Reconstruct scraper session
+        self.session = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
         self.session.cookies.update(cookies)
         self.session.headers.update(headers)
 
