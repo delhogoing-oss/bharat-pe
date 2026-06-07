@@ -46,7 +46,7 @@ async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
 class BharatPeClient:
     def __init__(self, mobile: str):
         self.mobile = mobile
-        # chrome110 is often more stable for CF bypass than newer versions
+        # Initialize session with minimal settings - curl_cffi handles the rest
         self.session = curl_requests.Session(
             impersonate="chrome110",
             proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
@@ -63,21 +63,13 @@ class BharatPeClient:
         self.xsrf_token = None
         self.merchant_name = "Merchant"
 
-        # Modern browser headers that Cloudflare expects
+        # Only set essential headers. DO NOT set User-Agent manually as it breaks impersonation.
         self.session.headers.update({
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "accept-language": "en-US,en;q=0.9",
-            "cache-control": "max-age=0",
-            "priority": "u=0, i",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "document",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
-            "sec-fetch-user": "?1",
             "upgrade-insecure-requests": "1",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
 
     def __getstate__(self):
@@ -105,66 +97,76 @@ class BharatPeClient:
 
     def _get_csrf_token(self, use_cache_buster: bool = False) -> bool:
         """Load main page and extract both HTML token and XSRF cookie."""
-        try:
-            import random
-            time.sleep(random.uniform(1.0, 3.0)) # Random delay to look human
-            
-            url = self.base_url
-            if use_cache_buster:
-                url += f"?_={int(time.time())}"
-            
-            # First load the main page to get cookies and tokens
-            # We use a clean set of headers for the main page load
-            resp = self.session.get(url, timeout=20)
-            
-            logger.info(f"GET {url} -> status {resp.status_code}")
-            
-            if resp.status_code == 403:
-                logger.error("Cloudflare blocked the initial request (403). Trying with Safari fallback...")
-                # Fallback to Safari impersonation if Chrome fails
-                self.session = curl_requests.Session(
-                    impersonate="safari15_5",
-                    proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
-                    timeout=30
-                )
-                resp = self.session.get(url, timeout=20)
-                if resp.status_code == 403:
-                    logger.error("Still blocked with Safari. Cloudflare is strictly guarding the page.")
-                    return False
-
-            if resp.status_code != 200:
-                logger.error(f"Failed to load main page: {resp.status_code}")
-                return False
-            
-            # 1. Extract HTML token (_token)
-            html_token = None
-            match = re.search(r'<input type="hidden" name="_token" value="([^"]+)"', resp.text)
-            if match:
-                html_token = match.group(1)
-            else:
-                match = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
-                if match:
-                    html_token = match.group(1)
-            
-            if html_token:
-                self.csrf_token = html_token
-                logger.info(f"HTML CSRF token extracted: {self.csrf_token}")
-            
-            # 2. Extract XSRF-TOKEN cookie
-            xsrf_cookie = self.session.cookies.get("XSRF-TOKEN")
-            if xsrf_cookie:
-                import urllib.parse
-                self.xsrf_token = urllib.parse.unquote(xsrf_cookie)
-                logger.info(f"XSRF token from cookie: {self.xsrf_token}")
-            
-            if not self.csrf_token and not self.xsrf_token:
-                logger.error("No token found in page or cookies")
-                return False
+        # Try different modern profiles
+        profiles = ["chrome120", "chrome110", "edge101", "safari15_5"]
+        
+        for profile in profiles:
+            try:
+                import random
+                time.sleep(random.uniform(2.0, 5.0)) # Random wait to bypass pattern detection
                 
-            return True
-        except Exception as e:
-            logger.error(f"CSRF fetch error: {e}")
-            return False
+                logger.info(f"Attempting Cloudflare bypass with profile: {profile} and proxy: {PROXY_URL[:30]}...")
+                
+                self.session = curl_requests.Session(
+                    impersonate=profile,
+                    proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
+                    timeout=30,
+                    allow_redirects=True
+                )
+                
+                # Standard browser headers for first-time visit
+                self.session.headers.update({
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1"
+                })
+                
+                # Try both the base URL and the login URL
+                target_url = self.base_url
+                resp = self.session.get(target_url, timeout=25)
+                
+                logger.info(f"GET {target_url} [{profile}] -> status {resp.status_code}")
+                
+                if resp.status_code == 200:
+                    # Look for tokens in the response text
+                    html_token = None
+                    # Try multiple patterns for CSRF token
+                    patterns = [
+                        r'name="_token" value="([^"]+)"',
+                        r'content="([^"]+)" name="csrf-token"',
+                        r'csrf-token" content="([^"]+)"'
+                    ]
+                    for pattern in patterns:
+                        match = re.search(pattern, resp.text)
+                        if match:
+                            html_token = match.group(1)
+                            break
+                    
+                    if html_token:
+                        self.csrf_token = html_token
+                        logger.info(f"CSRF token found via {profile}")
+                    
+                    xsrf_cookie = self.session.cookies.get("XSRF-TOKEN")
+                    if xsrf_cookie:
+                        import urllib.parse
+                        self.xsrf_token = urllib.parse.unquote(xsrf_cookie)
+                        logger.info(f"XSRF token found via {profile}")
+                    
+                    if self.csrf_token or self.xsrf_token:
+                        return True
+                
+                logger.warning(f"Profile {profile} failed with status {resp.status_code}")
+                
+            except Exception as e:
+                logger.error(f"Profile {profile} error: {e}")
+                continue
+                
+        logger.error("All bypass profiles failed. Please check if your proxy is working and not blocked.")
+        return False
 
     def request_otp(self) -> bool:
         """Send OTP and store UUID. Flexible enough to handle redirects or varying JSON."""
