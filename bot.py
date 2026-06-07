@@ -1,10 +1,9 @@
 import logging
 import re
 import time
-import requests
 import os
 import asyncio
-import cloudscraper
+from curl_cffi import requests as curl_requests
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any
@@ -34,6 +33,7 @@ load_dotenv()
 # Admin ID from environment variable (with fallback for safety during migration)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5664327265"))
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") # Telegram Group ID to send logs to
+PROXY_URL = os.getenv("PROXY_URL") # Proxy URL if any
 
 async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
     """Helper to send notifications to the log group."""
@@ -46,13 +46,10 @@ async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
 class BharatPeClient:
     def __init__(self, mobile: str):
         self.mobile = mobile
-        # Use cloudscraper to bypass Cloudflare protection
-        self.session = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
+        # Use curl_cffi to bypass Cloudflare by mimicking Chrome's TLS fingerprint
+        self.session = curl_requests.Session(
+            impersonate="chrome110",
+            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
         )
         self.base_url = "https://enterprise.bharatpe.in"
         self.deposit_api = "https://api-deposit.bharatpe.in"
@@ -65,25 +62,19 @@ class BharatPeClient:
         self.xsrf_token = None
         self.merchant_name = "Merchant"
 
-        # Headers are now managed primarily by cloudscraper, 
-        # but we add specific BharatPe requirements
         self.session.headers.update({
             "accept": "application/json, text/javascript, */*; q=0.01",
             "accept-language": "en-US,en;q=0.9",
             "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
             "origin": self.base_url,
             "referer": f"{self.base_url}/",
-            "sec-ch-ua-mobile": "?0",
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site",
             "x-requested-with": "XMLHttpRequest",
         })
 
     def __getstate__(self):
         """Prepare for pickling: extract session state."""
         state = self.__dict__.copy()
-        state["_session_cookies"] = requests.utils.dict_from_cookiejar(self.session.cookies)
+        state["_session_cookies"] = self.session.cookies.get_dict()
         state["_session_headers"] = dict(self.session.headers)
         del state["session"]
         return state
@@ -93,15 +84,13 @@ class BharatPeClient:
         cookies = state.pop("_session_cookies", {})
         headers = state.pop("_session_headers", {})
         self.__dict__.update(state)
-        # Reconstruct scraper session
-        self.session = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
+        # Reconstruct curl_cffi session
+        self.session = curl_requests.Session(
+            impersonate="chrome110",
+            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
         )
-        self.session.cookies.update(cookies)
+        for k, v in cookies.items():
+            self.session.cookies.set(k, v)
         self.session.headers.update(headers)
 
     def _get_csrf_token(self, use_cache_buster: bool = False) -> bool:
