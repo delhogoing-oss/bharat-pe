@@ -46,10 +46,11 @@ async def notify_log_group(context: ContextTypes.DEFAULT_TYPE, message: str):
 class BharatPeClient:
     def __init__(self, mobile: str):
         self.mobile = mobile
-        # Use curl_cffi to bypass Cloudflare by mimicking Chrome's TLS fingerprint
+        # Use a more modern Chrome version and specific impersonation
         self.session = curl_requests.Session(
-            impersonate="chrome110",
-            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+            impersonate="chrome120",
+            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
+            timeout=30
         )
         self.base_url = "https://enterprise.bharatpe.in"
         self.deposit_api = "https://api-deposit.bharatpe.in"
@@ -62,13 +63,21 @@ class BharatPeClient:
         self.xsrf_token = None
         self.merchant_name = "Merchant"
 
+        # Modern browser headers that Cloudflare expects
         self.session.headers.update({
-            "accept": "application/json, text/javascript, */*; q=0.01",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "accept-language": "en-US,en;q=0.9",
-            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "origin": self.base_url,
-            "referer": f"{self.base_url}/",
-            "x-requested-with": "XMLHttpRequest",
+            "cache-control": "max-age=0",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
 
     def __getstate__(self):
@@ -86,8 +95,9 @@ class BharatPeClient:
         self.__dict__.update(state)
         # Reconstruct curl_cffi session
         self.session = curl_requests.Session(
-            impersonate="chrome110",
-            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+            impersonate="chrome120",
+            proxies={"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None,
+            timeout=30
         )
         for k, v in cookies.items():
             self.session.cookies.set(k, v)
@@ -96,18 +106,30 @@ class BharatPeClient:
     def _get_csrf_token(self, use_cache_buster: bool = False) -> bool:
         """Load main page and extract both HTML token and XSRF cookie."""
         try:
+            import random
+            time.sleep(random.uniform(1.0, 3.0)) # Random delay to look human
+            
             url = self.base_url
             if use_cache_buster:
                 url += f"?_={int(time.time())}"
-            resp = self.session.get(url, timeout=10, headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate"
-            })
-            logger.debug(f"GET {url} -> status {resp.status_code}")
-            logger.debug(f"Cookies after GET: {dict(self.session.cookies)}")
             
+            # First load the main page to get cookies and tokens
+            # We use a clean set of headers for the main page load
+            resp = self.session.get(url, timeout=20)
+            
+            logger.info(f"GET {url} -> status {resp.status_code}")
+            
+            if resp.status_code == 403:
+                logger.error("Cloudflare blocked the initial request (403). Trying with mobile user agent fallback...")
+                # Fallback to mobile impersonation if desktop fails
+                self.session.impersonate = "safari_ios_16_0"
+                resp = self.session.get(url, timeout=20)
+                if resp.status_code == 403:
+                    logger.error("Still blocked with mobile UA. Cloudflare is strictly guarding the page.")
+                    return False
+
             if resp.status_code != 200:
                 logger.error(f"Failed to load main page: {resp.status_code}")
-                logger.error(f"Main page response: {resp.text[:500]}")
                 return False
             
             # 1. Extract HTML token (_token)
@@ -124,7 +146,7 @@ class BharatPeClient:
                 self.csrf_token = html_token
                 logger.info(f"HTML CSRF token extracted: {self.csrf_token}")
             
-            # 2. Extract XSRF-TOKEN cookie (often used in X-XSRF-TOKEN header)
+            # 2. Extract XSRF-TOKEN cookie
             xsrf_cookie = self.session.cookies.get("XSRF-TOKEN")
             if xsrf_cookie:
                 import urllib.parse
@@ -148,20 +170,25 @@ class BharatPeClient:
         url = f"{self.base_url}/v1/api/user/requestotp"
         data = {"mobile": self.mobile, "_token": self.csrf_token}
         
-        extra_headers = {
-            "X-CSRF-TOKEN": self.csrf_token,
-            "X-Requested-With": "XMLHttpRequest",
-            "Accept": "application/json, text/javascript, */*; q=0.01"
+        # Switch headers to AJAX mode for the API call
+        ajax_headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": self.base_url,
+            "referer": f"{self.base_url}/",
+            "x-csrf-token": self.csrf_token,
+            "x-requested-with": "XMLHttpRequest",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin"
         }
         if self.xsrf_token:
-            extra_headers["X-XSRF-TOKEN"] = self.xsrf_token
+            ajax_headers["x-xsrf-token"] = self.xsrf_token
         
         logger.info(f"POST {url} with data {data}")
         try:
-            # Allow redirects because some servers redirect to a 'verify' page on success
-            resp = self.session.post(url, data=data, headers=extra_headers, allow_redirects=True)
-            logger.debug(f"OTP Final status: {resp.status_code}")
-            logger.debug(f"OTP Final URL: {resp.url}")
+            resp = self.session.post(url, data=data, headers=ajax_headers, timeout=20)
+            logger.info(f"OTP status: {resp.status_code}")
             
             # If we were redirected to a page containing 'verify', it's likely a success
             if "verify" in resp.url.lower():
@@ -226,20 +253,24 @@ class BharatPeClient:
         if self.otp_uuid:
             data["uuid"] = self.otp_uuid
         
-        extra_headers = {
-            "X-CSRF-TOKEN": self.csrf_token,
-            "X-Requested-With": "XMLHttpRequest",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Referer": f"{self.base_url}/",
+        ajax_headers = {
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": self.base_url,
+            "referer": f"{self.base_url}/",
+            "x-csrf-token": self.csrf_token,
+            "x-requested-with": "XMLHttpRequest",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin"
         }
         if self.xsrf_token:
-            extra_headers["X-XSRF-TOKEN"] = self.xsrf_token
+            ajax_headers["x-xsrf-token"] = self.xsrf_token
 
         logger.info(f"POST {url} with data {data}")
         try:
-            logger.debug(f"Cookies before verify POST: {dict(self.session.cookies)}")
-            resp = self.session.post(url, data=data, headers=extra_headers)
-            logger.debug(f"Verify response status: {resp.status_code}")
+            resp = self.session.post(url, data=data, headers=ajax_headers, timeout=20)
+            logger.info(f"Verify response status: {resp.status_code}")
             
             # Handle Laravel 'Page Expired' error
             if resp.status_code == 419 and retry_on_419:
@@ -247,9 +278,9 @@ class BharatPeClient:
                 if self._get_csrf_token(use_cache_buster=True):
                     # Update data with new token
                     data["_token"] = self.csrf_token
-                    extra_headers["X-CSRF-TOKEN"] = self.csrf_token
+                    ajax_headers["x-csrf-token"] = self.csrf_token
                     if self.xsrf_token:
-                        extra_headers["X-XSRF-TOKEN"] = self.xsrf_token
+                        ajax_headers["x-xsrf-token"] = self.xsrf_token
                     return self.verify_otp(otp, retry_on_419=False)
             
             if resp.status_code != 200:
@@ -284,8 +315,13 @@ class BharatPeClient:
         if self.token:
             try:
                 url = f"{self.deposit_api}/bharatpe-account/v1/account"
-                headers = {"token": self.token}
-                resp = self.session.get(url, headers=headers)
+                headers = {
+                    "token": self.token,
+                    "accept": "application/json, text/javascript, */*; q=0.01",
+                    "referer": f"{self.base_url}/",
+                    "x-requested-with": "XMLHttpRequest"
+                }
+                resp = self.session.get(url, headers=headers, timeout=20)
                 if resp.ok:
                     data = resp.json()
                     m_id = data.get("data", {}).get("merchantId")
@@ -306,8 +342,14 @@ class BharatPeClient:
         if not self.is_logged_in or not self.token:
             return None
         url = f"{self.deposit_api}/bharatpe-account/v1/account"
+        headers = {
+            "token": self.token,
+            "accept": "application/json, text/javascript, */*; q=0.01",
+            "referer": f"{self.base_url}/",
+            "x-requested-with": "XMLHttpRequest"
+        }
         try:
-            resp = self.session.get(url)
+            resp = self.session.get(url, headers=headers, timeout=20)
             resp.raise_for_status()
             data = resp.json()
             if data.get("data"):
@@ -336,9 +378,14 @@ class BharatPeClient:
         
         url = f"{self.txn_api}/api/v1/merchant/transactions"
         try:
-            txn_headers = self.session.headers.copy()
-            txn_headers.update({"token": self.token})
-            resp = self.session.get(url, params=params, headers=txn_headers)
+            txn_headers = {
+                "token": self.token,
+                "accept": "application/json, text/javascript, */*; q=0.01",
+                "referer": f"{self.base_url}/",
+                "x-requested-with": "XMLHttpRequest",
+                "sec-fetch-site": "same-site"
+            }
+            resp = self.session.get(url, params=params, headers=txn_headers, timeout=20)
             if resp.status_code != 200:
                 return None
             data = resp.json()
